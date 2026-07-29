@@ -29,6 +29,18 @@ namespace Config
     constexpr long HOME_BACKOFF_TIMEOUT_MS = 2000;
     constexpr long HOME_BACKOFF_COUNTS = 32;
     constexpr long HOME_MIN_MOVEMENT_COUNTS = 5;
+    
+    static constexpr unsigned long HOME_INITIAL_STALL_TIME_MS = 1000;
+    
+    static constexpr int8_t HOME_UPWARD_ENCODER_DIRECTION = 1;
+
+    /*
+    * Minimum net movement required before deciding the axis genuinely
+    * travelled during the initial seek.
+    *
+    * This should be greater than encoder jitter at the mechanical stop.
+    */
+    static constexpr long HOME_INITIAL_MOVEMENT_COUNTS = 20;
 
     // Delay allowing mechanical load and encoder signals to settle.
     constexpr unsigned long HOME_SETTLE_TIME_MS = 100;
@@ -39,4 +51,24 @@ namespace Config
     // Maximum encoder movement in the unexpected direction before
     // treating it as a direction or wiring fault.
     constexpr long HOME_REVERSE_MOVEMENT_LIMIT = 20;
+
+    // Message packet params
+
+    constexpr uint32_t SERIAL_BAUDRATE = 115200;
+    constexpr uint8_t PACKET_LENGTH = 10;
+
+    constexpr uint8_t START_BYTE = 0xAA;
+    constexpr uint8_t END_BYTE   = 0x55;
+
+    constexpr uint8_t CRC_POLYNOMIAL = 0x07;
+    constexpr uint8_t CRC_INITIAL    = 0x00;
+
+    // Packet byte indices
+    constexpr uint8_t START_INDEX = 0;
+    constexpr uint8_t COMMAND_INDEX = 1;
+    constexpr uint8_t SEQUENCE_INDEX = 2;
+    constexpr uint8_t VALUE_INDEX = 3;
+    constexpr uint8_t FLAGS_INDEX = 7;
+    constexpr uint8_t CRC_INDEX = 8;
+    constexpr uint8_t END_INDEX = 9;
 }
