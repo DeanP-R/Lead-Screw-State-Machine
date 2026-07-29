@@ -2,7 +2,7 @@
 
 #include "config.hpp"
 #include "motor_driver.hpp"
-
+#include "encoder.hpp"
 
 
 namespace

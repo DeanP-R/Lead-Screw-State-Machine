@@ -22,9 +22,7 @@ bool readDistance(uint8_t &distanceMm){
 }
 
 bool initialiseDistanceSensor(){
-  if (!vl.begin()){
-    Serial.println("FAULT: VL6180X not detected");
-    
+  if (!vl.begin()){  
     return false;
   }
   return true;
