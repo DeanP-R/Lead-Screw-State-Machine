@@ -8,6 +8,5 @@ void pulseMotorCW();
 void pulseMotorCCW();
 void setEncoderPosition(long position);
 long getEncoderPosition();
-bool homing();
 bool readDistance(uint8_t &distanceMm);
 void initialiseMotor();
