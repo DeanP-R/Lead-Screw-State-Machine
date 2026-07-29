@@ -55,77 +55,40 @@ Pseudo-code
   END LOOP
   END
 ********************************************************************************************************/
-#include "config.hpp"
+#include "comms.hpp"
+#include "command_handler.hpp"
+#include "state_machine.hpp"
 #include "motor_driver.hpp"
-#include "vl6180x_driver.hpp"
-#include "tracking.hpp"
 #include "encoder.hpp"
-#include "homing.hpp"
-
-constexpr uint8_t LED_PIN = 13;
-
-
-void loop(){
-  // standoff_tracking();
-  byte msg[10];
-
-  if (Serial.readBytes(msg, 10) == 10)
-  {
-      if (msg[0] != 0xAA) //Wrong start byte
-      {
-          return;
-      }
-
-      if (msg[9] != 0x55) // Wrong end byte
-      {
-          return;
-      }
-
-      // Temporary CRC check
-      if (msg[8] != 0xD5) //Wrong CRC 
-      {
-          return;
-      }
-
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(1000);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(1000);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(1000);
-      digitalWrite(LED_BUILTIN, LOW);
-  }
-}
+#include "vl6180x_driver.hpp"
 
 void setup()
 {
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
+    initialiseComms();
+    initialiseStateMachine();
 
-    Serial.begin(115200);
-    Wire.begin();
+    initialiseMotor();
+    initialiseEncoder();
+    initialiseDistanceSensor();
+}
 
-    digitalWrite(LED_PIN, HIGH);
-    delay(1000);
-    digitalWrite(LED_PIN, LOW);
+void loop()
+{
+    Packet packet {};
 
-    // initialiseMotor();
-    // initialiseEncoder();
+    const PacketStatus status = receivePacket(packet);
 
-    // if (!initialiseDistanceSensor())
-    // {
-    //     stopMotor();
+    if (status == PacketStatus::Valid)
+    {
+        handlePacket(packet);
+    }
+    else if (status == PacketStatus::InvalidCrc)
+    {
+        sendNack(
+            packet.sequence,
+            NackReason::BadCrc
+        );
+    }
 
-    //     while (true)
-    //     {
-    //         delay(1000);
-    //     }
-    // }
-
-    // Serial.println("Sensor init OK");
-
-    // Serial.print("HOMING: ");
-    // Serial.println(homing());
-
-    // Serial.println("READY");
+    updateStateMachine();
 }
