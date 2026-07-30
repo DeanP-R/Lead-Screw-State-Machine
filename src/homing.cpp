@@ -137,12 +137,18 @@ HomingResult homing()
      * 5. Set the backed-off position as encoder zero.
      *
      * The backoff phase verifies that the motor and encoder are operating.
+     *
+     * Both the seek and backoff phases apply a short grace period at
+     * start-of-move before enforcing the reverse-movement check. This
+     * tolerates normal gear backlash / stop-rebound noise right as the
+     * motor starts driving, without masking genuine reverse-direction
+     * faults (wrong wiring, motor driving away from the stop, etc.),
+     * which will still be caught once the grace period elapses.
      */
 
     homed = false;
 
     stopMotor();
-    // return HomingResult::InvalidConfiguration;
 
     if (!validConfiguration())
     {
@@ -160,144 +166,91 @@ HomingResult homing()
     // ============================================================
 
     const unsigned long seekStartTime = millis();
-
-    unsigned long lastProgressTime =
-        seekStartTime;
-
-    const long seekStartPosition =
-        getEncoderPosition();
-
-    long lastProgressPosition =
-        seekStartPosition;
+    const long seekStartPosition = getEncoderPosition();
 
     bool movementObserved = false;
+
+    // Used only for the "genuine stall" check once movement has begun.
+    unsigned long lastWindowTime = seekStartTime;
+    long lastWindowPosition = seekStartPosition;
 
     driveMotorCCW(Config::MOTOR_PWM_SLOW);
 
     while (true)
     {
-        const unsigned long currentTime =
-            millis();
+        const unsigned long currentTime = millis();
+        const long currentPosition = getEncoderPosition();
 
-        const long currentPosition =
-            getEncoderPosition();
+        // --- Case A: reverse movement is a fault, once past the start-of-move grace period ---
+        const bool pastReverseCheckGrace =
+            (currentTime - seekStartTime) >= Config::HOME_REVERSE_CHECK_GRACE_MS;
 
-        /*
-         * Before genuine movement is recognised, compare against the
-         * original starting position.
-         *
-         * This prevents small encoder fluctuations at the mechanical
-         * stop from immediately being treated as real travel.
-         */
-        if (!movementObserved)
+        if (pastReverseCheckGrace)
         {
+            const long referenceForReverseCheck =
+                movementObserved ? lastWindowPosition : seekStartPosition;
+
             if (movedAgainstDirection(
                     currentPosition,
-                    seekStartPosition,
+                    referenceForReverseCheck,
                     upwardEncoderDirection,
                     Config::HOME_REVERSE_MOVEMENT_LIMIT
                 ))
             {
                 stopMotor();
-
                 return HomingResult::SeekReverseMovement;
             }
-
-            if (movedInDirection(
-                    currentPosition,
-                    seekStartPosition,
-                    upwardEncoderDirection,
-                    Config::HOME_INITIAL_MOVEMENT_COUNTS
-                ))
-            {
-                movementObserved = true;
-
-                lastProgressPosition =
-                    currentPosition;
-
-                lastProgressTime =
-                    currentTime;
-            }
         }
-        else
+
+        // --- Case B: detect that real movement has begun ---
+        if (!movementObserved &&
+            movedInDirection(
+                currentPosition,
+                seekStartPosition,
+                upwardEncoderDirection,
+                Config::HOME_INITIAL_MOVEMENT_COUNTS
+            ))
         {
-            /*
-             * Check for movement in the wrong direction before updating
-             * the progress reference.
-             */
-            if (movedAgainstDirection(
-                    currentPosition,
-                    lastProgressPosition,
-                    upwardEncoderDirection,
-                    Config::HOME_REVERSE_MOVEMENT_LIMIT
-                ))
+            movementObserved = true;
+            lastWindowPosition = currentPosition;
+            lastWindowTime = currentTime;
+        }
+
+        // --- Case C: once moving, check for a genuine stall on a fixed time window ---
+        if (movementObserved &&
+            currentTime - lastWindowTime >= Config::HOME_STALL_TIME_MS)
+        {
+            const bool madeEnoughProgress = movedInDirection(
+                currentPosition,
+                lastWindowPosition,
+                upwardEncoderDirection,
+                Config::HOME_MIN_MOVEMENT_COUNTS
+            );
+
+            if (!madeEnoughProgress)
             {
                 stopMotor();
-
-                return HomingResult::SeekReverseMovement;
+                break; // genuine stall against the stop — success path
             }
 
-            /*
-             * Record meaningful continued movement towards the stop.
-             */
-            if (movedInDirection(
-                    currentPosition,
-                    lastProgressPosition,
-                    upwardEncoderDirection,
-                    Config::HOME_MIN_MOVEMENT_COUNTS
-                ))
-            {
-                lastProgressPosition =
-                    currentPosition;
-
-                lastProgressTime =
-                    currentTime;
-            }
+            // Enough progress this window — slide the window forward and keep going.
+            lastWindowPosition = currentPosition;
+            lastWindowTime = currentTime;
         }
 
-        /*
-         * The mechanism travelled and has now stopped making meaningful
-         * progress. Treat this as reaching the upper mechanical stop.
-         */
-        if (
-            movementObserved &&
-            currentTime - lastProgressTime >=
-                Config::HOME_STALL_TIME_MS
-        )
+        // --- Case D: never got moving at all — assume already at the stop ---
+        if (!movementObserved &&
+            currentTime - seekStartTime >= Config::HOME_INITIAL_STALL_TIME_MS)
         {
             stopMotor();
-            break;
+            break; // treated as already-homed-ish; backoff phase will verify motor/encoder
         }
 
-        /*
-         * No substantial movement occurred after commanding upwards.
-         *
-         * Assume the mechanism started against the upper mechanical stop.
-         * The backoff phase must still demonstrate valid motor and encoder
-         * movement before homing succeeds.
-         */
-        if (
-            !movementObserved &&
-            currentTime - seekStartTime >=
-                Config::HOME_INITIAL_STALL_TIME_MS
-        )
+        // --- Case E: took too long overall once moving ---
+        if (movementObserved &&
+            currentTime - seekStartTime >= Config::HOME_TIMEOUT_MS)
         {
             stopMotor();
-            break;
-        }
-
-        /*
-         * Overall seek timeout only applies after genuine movement has
-         * begun.
-         */
-        if (
-            movementObserved &&
-            currentTime - seekStartTime >=
-                Config::HOME_TIMEOUT_MS
-        )
-        {
-            stopMotor();
-
             return HomingResult::SeekTimeout;
         }
     }
@@ -340,10 +293,16 @@ HomingResult homing()
             getEncoderPosition();
 
         /*
-         * Check for movement opposite to the expected backoff direction
-         * before updating the progress reference.
+         * Check for movement opposite to the expected backoff direction,
+         * once past the start-of-move grace period. Backlash/rebound
+         * noise right as the motor reverses off the stop is tolerated;
+         * genuine reverse faults are still caught afterwards.
          */
-        if (movedAgainstDirection(
+        const bool pastBackoffReverseCheckGrace =
+            (currentTime - backoffStartTime) >= Config::HOME_REVERSE_CHECK_GRACE_MS;
+
+        if (pastBackoffReverseCheckGrace &&
+            movedAgainstDirection(
                 currentPosition,
                 lastBackoffProgressPosition,
                 backoffEncoderDirection,

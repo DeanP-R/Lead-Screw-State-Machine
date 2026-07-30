@@ -24,10 +24,14 @@ namespace Config
     constexpr uint8_t TOLERANCE_MM = 2;
 
     // Homing settings
+    // Grace period after starting a seek/backoff move, during which
+    // small reverse encoder noise (gear backlash, stop rebound) is
+    // tolerated rather than treated as a reverse-movement fault.
+    static constexpr unsigned long HOME_REVERSE_CHECK_GRACE_MS = 150;
     constexpr unsigned long HOME_STALL_TIME_MS = 500;
-    constexpr unsigned long HOME_TIMEOUT_MS = 10000;
+    constexpr unsigned long HOME_TIMEOUT_MS = 5000;
     constexpr long HOME_BACKOFF_TIMEOUT_MS = 2000;
-    constexpr long HOME_BACKOFF_COUNTS = 32;
+    constexpr long HOME_BACKOFF_COUNTS = 320;
     constexpr long HOME_MIN_MOVEMENT_COUNTS = 5;
     
     static constexpr unsigned long HOME_INITIAL_STALL_TIME_MS = 1000;
@@ -51,6 +55,21 @@ namespace Config
     // Maximum encoder movement in the unexpected direction before
     // treating it as a direction or wiring fault.
     constexpr long HOME_REVERSE_MOVEMENT_LIMIT = 20;
+
+    // MoveRelative / MoveAbsolute settings
+    // How close (in encoder counts) is close enough to call a move complete.
+    static constexpr long MOVE_TOLERANCE_COUNTS = 5;
+
+    // Safety cutoff for a single commanded move, in case the mechanism
+    // stalls or the target is unreachable.
+    static constexpr unsigned long MOVE_TIMEOUT_MS = 8000;
+
+    // If less than MOVE_MIN_PROGRESS_COUNTS of progress toward the
+    // target has been made within MOVE_STALL_TIME_MS, stop rather than
+    // continuing to drive into whatever is blocking the mechanism
+    // (e.g. a target requested past the physical end of travel).
+    static constexpr long MOVE_MIN_PROGRESS_COUNTS = 5;
+    static constexpr unsigned long MOVE_STALL_TIME_MS = 500;
 
     // Message packet params
 

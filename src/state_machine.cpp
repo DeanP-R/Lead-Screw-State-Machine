@@ -1,5 +1,8 @@
 #include "state_machine.hpp"
 
+#include <stdlib.h>
+
+#include "config.hpp"
 #include "comms.hpp"
 #include "encoder.hpp"
 #include "motor_driver.hpp"
@@ -15,6 +18,30 @@ namespace
     int32_t requestedPosition = 0;
     int32_t requestedMovement = 0;
 
+    // Set once, on the first tick after entering MovingRelative /
+    // MovingAbsolute, then held for the duration of that move.
+    bool movementTargetSet = false;
+    long movementTargetPosition = 0;
+    unsigned long movementStartTime = 0;
+
+    // Tracks the most recent point at which meaningful progress toward
+    // the target was observed, to detect a stalled/blocked move.
+    long movementProgressPosition = 0;
+    unsigned long movementProgressTime = 0;
+
+    // Fault reason codes reported via Response::Fault's flags byte
+    // when a commanded move fails. Kept local to this file since
+    // callers only ever see them echoed back over the wire.
+    enum class MoveFault : uint8_t
+    {
+        Timeout = 0x01,
+        Stall = 0x02
+    };
+
+    void resetMovementTracking()
+    {
+        movementTargetSet = false;
+    }
 }
 
 void initialiseStateMachine()
@@ -27,6 +54,8 @@ void initialiseStateMachine()
 
     requestedPosition = 0;
     requestedMovement = 0;
+
+    resetMovementTracking();
 }
 LifterState getLifterState()
 {
@@ -112,6 +141,7 @@ bool requestStopTracking(uint8_t sequence)
 void requestStop()
 {
     stopMotor();
+    resetMovementTracking();
     currentState = LifterState::Idle;
 }
 
@@ -119,6 +149,7 @@ void clearFault()
 {
     if (currentState == LifterState::Fault)
     {
+        resetMovementTracking();
         currentState = LifterState::Idle;
     }
 }
@@ -188,12 +219,110 @@ void updateStateMachine()
 
         case LifterState::MovingRelative:
         {
-            /*
-            #TODO:
+            const unsigned long currentTime = millis();
+            const long currentPosition = getEncoderPosition();
 
-            const MovementStatus status =
-                updateRelativeMovement(requestedMovement);
-            */
+            if (!movementTargetSet)
+            {
+                movementTargetPosition =
+                    currentPosition + requestedMovement;
+
+                movementStartTime = currentTime;
+                movementProgressTime = currentTime;
+                movementProgressPosition = currentPosition;
+                movementTargetSet = true;
+            }
+
+            const long remaining =
+                movementTargetPosition - currentPosition;
+
+            /*
+             * Close enough — treat the move as complete. Chasing an
+             * exact count would fight encoder noise and backlash near
+             * the target forever.
+             */
+            if (labs(remaining) <= Config::MOVE_TOLERANCE_COUNTS)
+            {
+                stopMotor();
+                resetMovementTracking();
+
+                sendPacket(
+                    Response::MoveComplete,
+                    activeSequence,
+                    currentPosition,
+                    static_cast<uint8_t>(LifterState::Idle)
+                );
+
+                currentState = LifterState::Idle;
+
+                break;
+            }
+
+            /*
+             * Safety cutoff if the target is never reached (mechanism
+             * jammed, unreachable target, etc).
+             */
+            if (currentTime - movementStartTime >= Config::MOVE_TIMEOUT_MS)
+            {
+                stopMotor();
+                resetMovementTracking();
+
+                sendPacket(
+                    Response::Fault,
+                    activeSequence,
+                    currentPosition,
+                    static_cast<uint8_t>(MoveFault::Timeout)
+                );
+
+                currentState = LifterState::Fault;
+
+                break;
+            }
+
+            /*
+             * Stall protection: if the mechanism is blocked (e.g. the
+             * target is past the physical end of travel), don't keep
+             * driving into it for the full timeout — stop as soon as
+             * progress toward the target has genuinely stopped.
+             */
+            if (labs(currentPosition - movementProgressPosition) >=
+                Config::MOVE_MIN_PROGRESS_COUNTS)
+            {
+                movementProgressPosition = currentPosition;
+                movementProgressTime = currentTime;
+            }
+            else if (currentTime - movementProgressTime >=
+                     Config::MOVE_STALL_TIME_MS)
+            {
+                stopMotor();
+                resetMovementTracking();
+
+                sendPacket(
+                    Response::Fault,
+                    activeSequence,
+                    currentPosition,
+                    static_cast<uint8_t>(MoveFault::Stall)
+                );
+
+                currentState = LifterState::Fault;
+
+                break;
+            }
+
+            /*
+             * Not there yet — nudge one pulse closer. Positive
+             * `remaining` means the target is above the current
+             * position (encoder increasing = upward, per
+             * driveMotorCCW's convention in motor_driver.cpp).
+             */
+            if (remaining > 0)
+            {
+                pulseMotorCCW();
+            }
+            else
+            {
+                pulseMotorCW();
+            }
 
             break;
         }
@@ -201,6 +330,7 @@ void updateStateMachine()
         case LifterState::Tracking:
         {
             standoff_tracking();
+            break;
         }
 
         case LifterState::Fault:
