@@ -31,12 +31,14 @@ namespace Config
     constexpr unsigned long HOME_STALL_TIME_MS = 500;
     constexpr unsigned long HOME_TIMEOUT_MS = 5000;
     constexpr long HOME_BACKOFF_TIMEOUT_MS = 2000;
-    constexpr long HOME_BACKOFF_COUNTS = 320;
+    constexpr long HOME_BACKOFF_COUNTS = 32;
     constexpr long HOME_MIN_MOVEMENT_COUNTS = 5;
     
     static constexpr unsigned long HOME_INITIAL_STALL_TIME_MS = 1000;
     
-    static constexpr int8_t HOME_UPWARD_ENCODER_DIRECTION = 1;
+    // With the deployed encoder wiring, CCW/upward motion decreases
+    // the count; CW backoff therefore increases it.
+    static constexpr int8_t HOME_UPWARD_ENCODER_DIRECTION = -1;
 
     /*
     * Minimum net movement required before deciding the axis genuinely

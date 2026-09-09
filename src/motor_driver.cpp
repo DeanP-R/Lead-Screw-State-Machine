@@ -3,14 +3,14 @@
 #include "config.hpp"
 #include "motor_driver.hpp"
 
-void driveMotorCW(uint8_t pwm){ // this goes down and encoder decreases
+void driveMotorCW(uint8_t pwm){ // this goes down and encoder increases
   digitalWrite(Config::MOTOR_A, HIGH);
   digitalWrite(Config::MOTOR_B, LOW);
   analogWrite(Config::MOTOR_EN, pwm);
 }
 
 
-void driveMotorCCW(uint8_t pwm){ // this goes up and encoder increases
+void driveMotorCCW(uint8_t pwm){ // this goes up and encoder decreases
   digitalWrite(Config::MOTOR_A, LOW);
   digitalWrite(Config::MOTOR_B, HIGH);
   analogWrite(Config::MOTOR_EN, pwm);
@@ -40,6 +40,5 @@ void pulseMotorCCW(){
   delay(Config::MOTOR_PULSE_MS);
   stopMotor();
 }
-
 
 

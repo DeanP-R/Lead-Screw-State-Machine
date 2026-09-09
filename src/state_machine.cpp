@@ -311,17 +311,17 @@ void updateStateMachine()
 
             /*
              * Not there yet — nudge one pulse closer. Positive
-             * `remaining` means the target is above the current
-             * position (encoder increasing = upward, per
-             * driveMotorCCW's convention in motor_driver.cpp).
+             * `remaining` means the target is below the current
+             * position (encoder increasing = downward, per
+             * driveMotorCW's convention in motor_driver.cpp).
              */
             if (remaining > 0)
             {
-                pulseMotorCCW();
+                pulseMotorCW();
             }
             else
             {
-                pulseMotorCW();
+                pulseMotorCCW();
             }
 
             break;
