@@ -39,11 +39,6 @@ namespace
             return false;
         }
 
-        if (Config::HOME_INITIAL_STALL_TIME_MS == 0)
-        {
-            return false;
-        }
-
         if (Config::HOME_STALL_TIME_MS == 0)
         {
             return false;
@@ -238,12 +233,15 @@ HomingResult homing()
             lastWindowTime = currentTime;
         }
 
-        // --- Case D: never got moving at all — assume already at the stop ---
+        // --- Case D: never got moving at all ---
         if (!movementObserved &&
-            currentTime - seekStartTime >= Config::HOME_INITIAL_STALL_TIME_MS)
+            currentTime - seekStartTime >= Config::HOME_TIMEOUT_MS)
         {
             stopMotor();
-            break; // treated as already-homed-ish; backoff phase will verify motor/encoder
+            // Encoder feedback cannot distinguish an axis already at the
+            // stop from a failed motor or encoder. Do not back off and
+            // establish a false home in that ambiguous condition.
+            return HomingResult::SeekNoMovement;
         }
 
         // --- Case E: took too long overall once moving ---

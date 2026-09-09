@@ -11,8 +11,11 @@ namespace
 
 void initialiseEncoder()
 {
-    pinMode(Config::ENCODER_A, INPUT);
-    pinMode(Config::ENCODER_B, INPUT);
+    // The encoder outputs are open-collector on the deployed hardware.
+    // Without pull-ups the inputs float and can produce only a few net
+    // counts during an otherwise real motor movement.
+    pinMode(Config::ENCODER_A, INPUT_PULLUP);
+    pinMode(Config::ENCODER_B, INPUT_PULLUP);
     attachInterrupt(
         digitalPinToInterrupt(Config::ENCODER_A),
         readEncoder,

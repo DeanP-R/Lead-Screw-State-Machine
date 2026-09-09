@@ -29,12 +29,12 @@ namespace Config
     // tolerated rather than treated as a reverse-movement fault.
     static constexpr unsigned long HOME_REVERSE_CHECK_GRACE_MS = 150;
     constexpr unsigned long HOME_STALL_TIME_MS = 500;
-    constexpr unsigned long HOME_TIMEOUT_MS = 5000;
-    constexpr long HOME_BACKOFF_TIMEOUT_MS = 2000;
+    constexpr unsigned long HOME_TIMEOUT_MS = 10000;
+    constexpr long HOME_BACKOFF_TIMEOUT_MS = 5000;
     constexpr long HOME_BACKOFF_COUNTS = 32;
-    constexpr long HOME_MIN_MOVEMENT_COUNTS = 5;
-    
-    static constexpr unsigned long HOME_INITIAL_STALL_TIME_MS = 1000;
+    // A single valid count is sufficient to establish that an axis has
+    // begun moving; the stall timer still protects against a stop.
+    constexpr long HOME_MIN_MOVEMENT_COUNTS = 1;
     
     // With the deployed encoder wiring, CCW/upward motion decreases
     // the count; CW backoff therefore increases it.
@@ -46,7 +46,7 @@ namespace Config
     *
     * This should be greater than encoder jitter at the mechanical stop.
     */
-    static constexpr long HOME_INITIAL_MOVEMENT_COUNTS = 20;
+    static constexpr long HOME_INITIAL_MOVEMENT_COUNTS = 1;
 
     // Delay allowing mechanical load and encoder signals to settle.
     constexpr unsigned long HOME_SETTLE_TIME_MS = 100;
