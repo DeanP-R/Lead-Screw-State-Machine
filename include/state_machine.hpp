@@ -4,36 +4,49 @@
 
 enum class LifterState : uint8_t
 {
-    Idle             = 0x00,
-    Homing           = 0x01,
-    MovingAbsolute   = 0x02,
-    MovingRelative   = 0x03,
-    Tracking         = 0x04,
-    Fault            = 0x05
+    Idle = 0, Homing = 1, Moving = 2, Tracking = 3,
+    Stopping = 4, Fault = 5
 };
 
-void initialiseStateMachine();
+enum class FaultCode : uint8_t
+{
+    None = 0x00,
+    // Preserve the existing Python tool's homing reason values 0x01-0x09.
+    HomingInvalidConfiguration = 0x01,
+    HomingSeekNoMovement = 0x02,
+    HomingSeekReverse = 0x03,
+    HomingSeekTimeout = 0x04,
+    HomingBackoffNoMovement = 0x05,
+    HomingBackoffReverse = 0x06,
+    HomingBackoffStall = 0x07,
+    HomingBackoffTimeout = 0x08,
+    HomingZeroing = 0x09,
+    SensorInitialisation = 0x10,
+    MoveStall = 0x20,
+    MoveTimeout = 0x21,
+    TravelLimit = 0x22,
+    MotorCommandTimeout = 0x23,
+    SensorTimeout = 0x30,
+    TrackingAtLimit = 0x31,
+    TrackingDiverging = 0x32
+};
 
-void updateStateMachine();
+enum class RequestResult : uint8_t
+{
+    Accepted, Busy, InvalidState, NotHomed, OutOfRange,
+    NotCommissioned, SensorInvalid
+};
 
-LifterState getLifterState();
-
-bool requestHoming(uint8_t sequence);
-
-bool requestMoveAbsolute(
-    uint8_t sequence,
-    int32_t targetPosition
-);
-
-bool requestMoveRelative(
-    uint8_t sequence,
-    int32_t movement
-);
-
-bool requestStartTracking(uint8_t sequence);
-
-bool requestStopTracking(uint8_t sequence);
-
+void initialiseStateMachine(bool sensorInitialised, unsigned long now);
+void updateStateMachine(unsigned long now);
+RequestResult requestHoming(uint8_t sequence, unsigned long now);
+RequestResult requestMoveAbsolute(uint8_t sequence, long target, unsigned long now);
+RequestResult requestMoveRelative(uint8_t sequence, long offset, unsigned long now);
+RequestResult requestStartTracking(uint8_t sequence, unsigned long now);
+RequestResult requestStopTracking();
 void requestStop();
-
-void clearFault();
+bool clearFault();
+void setTelemetryEnabled(bool enabled);
+bool isTelemetryEnabled();
+LifterState getLifterState();
+FaultCode getFaultCode();

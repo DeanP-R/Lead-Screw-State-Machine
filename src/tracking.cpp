@@ -1,31 +1,38 @@
-#include <Arduino.h>
+#include "tracking.hpp"
+
 #include "config.hpp"
-#include "motor_driver.hpp"
-#include "vl6180x_driver.hpp"
 
-void standoff_tracking(){
-  uint8_t distanceMm = 0;
-  if (!readDistance(distanceMm)){
-    return;
-  }
-  else{
+namespace
+{
+    uint16_t target = Config::TARGET_STANDOFF_MM;
+    uint16_t previousError = 0xFFFF;
+    uint8_t nonImproving = 0;
+}
 
-    if((distanceMm) > (Config::TARGET_MM + Config::TOLERANCE_MM))
+void resetTrackingMonitor()
+{
+    previousError = 0xFFFF;
+    nonImproving = 0;
+}
+
+bool setTrackingStandoff(uint16_t millimetres)
+{
+    if (millimetres == 0 || millimetres > 2000) return false;
+    target = millimetres;
+    resetTrackingMonitor();
+    return true;
+}
+
+uint16_t getTrackingStandoff() { return target; }
+
+bool recordTrackingError(uint16_t error)
+{
+    if (previousError != 0xFFFF &&
+        error + Config::TRACKING_MIN_IMPROVEMENT_MM >= previousError)
     {
-      pulseMotorCW();
-      stopMotor();
-      return;
+        if (nonImproving < 0xFF) ++nonImproving;
     }
-    else if((distanceMm) < (Config::TARGET_MM - Config::TOLERANCE_MM))
-    {
-      pulseMotorCCW();
-      stopMotor();
-      return;
-    }
-    else{
-      stopMotor();
-      return;
-    }
-    
-  }
+    else nonImproving = 0;
+    previousError = error;
+    return nonImproving < Config::TRACKING_MAX_NON_IMPROVING_CORRECTIONS;
 }

@@ -1,12 +1,15 @@
-// #include <config.hpp>
+#pragma once
 
-void readEncoder();
-void driveMotorCW(uint8_t pwm);
-void driveMotorCCW(uint8_t pwm);
-void stopMotor();
-void pulseMotorCW();
-void pulseMotorCCW();
-void setEncoderPosition(long position);
-long getEncoderPosition();
-bool readDistance(uint8_t &distanceMm);
+#include <Arduino.h>
+
+enum class MotorDirection : int8_t { Negative = -1, Stopped = 0, Positive = 1 };
+
 void initialiseMotor();
+void commandMotor(MotorDirection direction, uint8_t runPwm, unsigned long now);
+void updateMotor(unsigned long now);
+void finishMotorStartBoost();
+void stopMotor();
+bool isMotorRunning();
+MotorDirection getMotorDirection();
+uint8_t getAppliedPwm();
+unsigned long getMotorCommandStartTime();

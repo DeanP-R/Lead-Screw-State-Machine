@@ -1,93 +1,77 @@
 #pragma once
 
 #include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_VL6180X.h>
+
 namespace Config
 {
-    // Motor driver pins
     constexpr uint8_t MOTOR_EN = 9;
-    constexpr uint8_t MOTOR_A  = 4;
-    constexpr uint8_t MOTOR_B  = 7;
-
-    // Encoder pins
+    constexpr uint8_t MOTOR_A = 4;
+    constexpr uint8_t MOTOR_B = 7;
     constexpr uint8_t ENCODER_A = 3;
     constexpr uint8_t ENCODER_B = 6;
-
-    // Motor settings
-    constexpr uint8_t MOTOR_PWM = 200;
-    constexpr uint8_t MOTOR_PWM_SLOW = 150;
-    constexpr unsigned long MOTOR_PULSE_MS = 10;
-
-    // Distance-control settings
-    constexpr uint8_t TARGET_MM = 10;
-    constexpr uint8_t TOLERANCE_MM = 2;
-
-    // Homing settings
-    // Grace period after starting a seek/backoff move, during which
-    // small reverse encoder noise (gear backlash, stop rebound) is
-    // tolerated rather than treated as a reverse-movement fault.
-    static constexpr unsigned long HOME_REVERSE_CHECK_GRACE_MS = 150;
-    constexpr unsigned long HOME_STALL_TIME_MS = 500;
-    constexpr unsigned long HOME_TIMEOUT_MS = 5000;
-    constexpr long HOME_BACKOFF_TIMEOUT_MS = 2000;
-    constexpr long HOME_BACKOFF_COUNTS = 320;
-    constexpr long HOME_MIN_MOVEMENT_COUNTS = 5;
-    
-    static constexpr unsigned long HOME_INITIAL_STALL_TIME_MS = 1000;
-    
-    static constexpr int8_t HOME_UPWARD_ENCODER_DIRECTION = 1;
-
-    /*
-    * Minimum net movement required before deciding the axis genuinely
-    * travelled during the initial seek.
-    *
-    * This should be greater than encoder jitter at the mechanical stop.
-    */
-    static constexpr long HOME_INITIAL_MOVEMENT_COUNTS = 20;
-
-    // Delay allowing mechanical load and encoder signals to settle.
-    constexpr unsigned long HOME_SETTLE_TIME_MS = 100;
-
-    // How often diagnostic information is printed.
-    constexpr unsigned long HOME_DEBUG_INTERVAL_MS = 100;
-
-    // Maximum encoder movement in the unexpected direction before
-    // treating it as a direction or wiring fault.
-    constexpr long HOME_REVERSE_MOVEMENT_LIMIT = 20;
-
-    // MoveRelative / MoveAbsolute settings
-    // How close (in encoder counts) is close enough to call a move complete.
-    static constexpr long MOVE_TOLERANCE_COUNTS = 5;
-
-    // Safety cutoff for a single commanded move, in case the mechanism
-    // stalls or the target is unreachable.
-    static constexpr unsigned long MOVE_TIMEOUT_MS = 8000;
-
-    // If less than MOVE_MIN_PROGRESS_COUNTS of progress toward the
-    // target has been made within MOVE_STALL_TIME_MS, stop rather than
-    // continuing to drive into whatever is blocking the mechanism
-    // (e.g. a target requested past the physical end of travel).
-    static constexpr long MOVE_MIN_PROGRESS_COUNTS = 5;
-    static constexpr unsigned long MOVE_STALL_TIME_MS = 500;
-
-    // Message packet params
-
     constexpr uint32_t SERIAL_BAUDRATE = 115200;
-    constexpr uint8_t PACKET_LENGTH = 10;
 
-    constexpr uint8_t START_BYTE = 0xAA;
-    constexpr uint8_t END_BYTE   = 0x55;
+    // Automatic movement remains inhibited until physical commissioning.
+    constexpr bool COMMISSIONING_COMPLETE = false;
+    constexpr bool MOTOR_DIRECTION_VERIFIED = false;
+    constexpr bool HOMING_VERIFIED = false;
+    constexpr bool TRAVEL_LIMITS_VERIFIED = false;
+    constexpr bool FEEDBACK_DIRECTION_VERIFIED = false;
+    constexpr bool AUTO_HOME_ON_STARTUP = false;
+    constexpr bool AUTO_TRACK_ON_STARTUP = false;
+    // Temporarily enable only for supervised, short direction-check jogs.
+    constexpr bool COMMISSIONING_JOG_ENABLED = false;
+    constexpr long COMMISSIONING_MAX_JOG_COUNTS = 100;
 
-    constexpr uint8_t CRC_POLYNOMIAL = 0x07;
-    constexpr uint8_t CRC_INITIAL    = 0x00;
+    constexpr int8_t HOME_SEEK_ENCODER_DIRECTION = 1;
+    // +1: positive motion increases distance; -1: decreases it; 0: unknown.
+    constexpr int8_t DISTANCE_CHANGE_PER_POSITIVE_MOTION = 0;
 
-    // Packet byte indices
-    constexpr uint8_t START_INDEX = 0;
-    constexpr uint8_t COMMAND_INDEX = 1;
-    constexpr uint8_t SEQUENCE_INDEX = 2;
-    constexpr uint8_t VALUE_INDEX = 3;
-    constexpr uint8_t FLAGS_INDEX = 7;
-    constexpr uint8_t CRC_INDEX = 8;
-    constexpr uint8_t END_INDEX = 9;
+    // Conservative placeholders. They are unusable while verification is false.
+    constexpr long TRAVEL_MIN_COUNTS = -5000;
+    constexpr long TRAVEL_MAX_COUNTS = 0;
+
+    constexpr uint8_t MOTOR_START_PWM = 230;
+    constexpr uint8_t MOTOR_RUN_PWM = 185;
+    constexpr uint8_t MOTOR_HOMING_PWM = 165;
+    constexpr uint8_t MOTOR_APPROACH_PWM = 140;
+    constexpr uint8_t MOTOR_MIN_PWM = 120;
+    constexpr unsigned long MOTOR_START_BOOST_MS = 120;
+    constexpr unsigned long MOTOR_RAMP_INTERVAL_MS = 20;
+    constexpr uint8_t MOTOR_RAMP_STEP = 5;
+    constexpr unsigned long MOTOR_COMMAND_TIMEOUT_MS = 8000;
+
+    constexpr long MOVE_TOLERANCE_COUNTS = 5;
+    constexpr long MOVE_MIN_PROGRESS_COUNTS = 5;
+    constexpr long MOVE_DECEL_WINDOW_COUNTS = 50;
+    constexpr unsigned long MOVE_STALL_TIME_MS = 500;
+    constexpr unsigned long MOVE_TIMEOUT_MS = 8000;
+
+    constexpr long HOME_BACKOFF_COUNTS = 320;
+    constexpr long HOME_MAX_SEEK_COUNTS = 6000;
+    constexpr long HOME_INITIAL_MOVEMENT_COUNTS = 20;
+    constexpr long HOME_MIN_PROGRESS_COUNTS = 5;
+    constexpr long HOME_REVERSE_LIMIT_COUNTS = 20;
+    constexpr unsigned long HOME_REVERSE_GRACE_MS = 150;
+    constexpr unsigned long HOME_INITIAL_STALL_MS = 1000;
+    constexpr unsigned long HOME_STALL_MS = 500;
+    constexpr unsigned long HOME_SEEK_TIMEOUT_MS = 5000;
+    constexpr unsigned long HOME_BACKOFF_TIMEOUT_MS = 2500;
+    constexpr unsigned long HOME_SETTLE_MS = 100;
+
+    constexpr uint16_t TARGET_STANDOFF_MM = 10;
+    constexpr uint16_t TRACKING_DEADBAND_MM = 2;
+    constexpr uint8_t SENSOR_FILTER_SAMPLES = 5;
+    constexpr uint8_t SENSOR_VALID_SAMPLES_REQUIRED = 3;
+    constexpr unsigned long SENSOR_SAMPLE_INTERVAL_MS = 100;
+    constexpr unsigned long SENSOR_TIMEOUT_MS = 1000;
+    constexpr uint16_t SENSOR_IO_TIMEOUT_MS = 50;
+    constexpr long TRACKING_COUNTS_PER_MM = 10;
+    constexpr long TRACKING_MIN_CORRECTION_COUNTS = 5;
+    constexpr long TRACKING_MAX_CORRECTION_COUNTS = 40;
+    constexpr unsigned long TRACKING_SETTLE_MS = 150;
+    constexpr uint8_t TRACKING_MAX_NON_IMPROVING_CORRECTIONS = 8;
+    constexpr uint16_t TRACKING_MIN_IMPROVEMENT_MM = 1;
+
+    constexpr unsigned long TELEMETRY_INTERVAL_MS = 100;
 }

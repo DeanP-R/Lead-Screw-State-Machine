@@ -1,185 +1,52 @@
-#include <Arduino.h>
-
-#include "config.hpp"
 #include "comms.hpp"
+#include "config.hpp"
 
-void initialiseComms()
+namespace
 {
-    Serial.begin(Config::SERIAL_BAUDRATE);
+    uint8_t receiveBuffer[Protocol::PacketLength] = {};
+    size_t receiveLength = 0;
 }
 
-uint8_t calculateCrc8(const uint8_t* data, size_t length)
+void initialiseComms() { Serial.begin(Config::SERIAL_BAUDRATE); }
+
+PacketStatus receivePacket(Packet& packet, uint8_t& rejectedSequence)
 {
-    uint8_t crc = Config::CRC_INITIAL;
-
-    for (size_t i = 0; i < length; i++)
+    while (Serial.available() > 0)
     {
-        crc ^= data[i];
+        const uint8_t byte = static_cast<uint8_t>(Serial.read());
+        if (receiveLength == 0 && byte != Protocol::StartByte) continue;
+        receiveBuffer[receiveLength++] = byte;
+        if (receiveLength < Protocol::PacketLength) continue;
 
-        for (uint8_t bit = 0; bit < 8; bit++)
+        rejectedSequence = receiveBuffer[2];
+        const Protocol::DecodeStatus status = Protocol::decode(receiveBuffer, packet);
+        if (status == Protocol::DecodeStatus::Valid)
         {
-            if ((crc & 0x80U) != 0U)
-            {
-                crc = static_cast<uint8_t>(
-                    (crc << 1U) ^ Config::CRC_POLYNOMIAL
-                );
-            }
-            else
-            {
-                crc = static_cast<uint8_t>(crc << 1U);
-            }
+            receiveLength = 0;
+            return PacketStatus::Valid;
         }
+
+        size_t nextStart = 1;
+        while (nextStart < Protocol::PacketLength &&
+               receiveBuffer[nextStart] != Protocol::StartByte) ++nextStart;
+        receiveLength = Protocol::PacketLength - nextStart;
+        for (size_t index = 0; index < receiveLength; ++index)
+            receiveBuffer[index] = receiveBuffer[nextStart + index];
+        if (status == Protocol::DecodeStatus::InvalidCrc) return PacketStatus::InvalidCrc;
     }
-
-    return crc;
-}
-void sendStatus(
-    uint8_t sequence,
-    int32_t encoderPosition,
-    uint8_t state
-)
-{
-    sendPacket(
-        Response::Status,
-        sequence,
-        encoderPosition,
-        state
-    );
-}
-bool sendPacket(
-    Response response,
-    uint8_t sequence,
-    int32_t value,
-    uint8_t flags
-)
-{
-    uint8_t msg[Config::PACKET_LENGTH] = {};
-
-    msg[Config::START_INDEX] = Config::START_BYTE;
-    msg[Config::COMMAND_INDEX] = static_cast<uint8_t>(response);
-    msg[Config::SEQUENCE_INDEX] = sequence;
-
-    const uint32_t rawValue = static_cast<uint32_t>(value);
-
-    msg[Config::VALUE_INDEX] =
-        static_cast<uint8_t>(rawValue & 0xFFU);
-
-    msg[Config::VALUE_INDEX + 1] =
-        static_cast<uint8_t>((rawValue >> 8U) & 0xFFU);
-
-    msg[Config::VALUE_INDEX + 2] =
-        static_cast<uint8_t>((rawValue >> 16U) & 0xFFU);
-
-    msg[Config::VALUE_INDEX + 3] =
-        static_cast<uint8_t>((rawValue >> 24U) & 0xFFU);
-
-    msg[Config::FLAGS_INDEX] = flags;
-
-    msg[Config::CRC_INDEX] = calculateCrc8(
-        &msg[Config::COMMAND_INDEX],
-        Config::CRC_INDEX - Config::COMMAND_INDEX
-    );
-
-    msg[Config::END_INDEX] = Config::END_BYTE;
-
-    const size_t bytesWritten = Serial.write(
-        msg,
-        Config::PACKET_LENGTH
-    );
-
-    return bytesWritten == Config::PACKET_LENGTH;
+    return PacketStatus::NoPacket;
 }
 
-void sendAck(uint8_t sequence)
+bool sendPacket(Response response, uint8_t sequence, int32_t value, uint8_t flags)
 {
-    sendPacket(
-        Response::Ack,
-        sequence,
-        0,
-        0
-    );
+    const Packet packet {static_cast<uint8_t>(response), sequence, value, flags};
+    uint8_t frame[Protocol::PacketLength] = {};
+    Protocol::encode(packet, frame);
+    return Serial.write(frame, sizeof(frame)) == sizeof(frame);
 }
 
-void sendNack(
-    uint8_t sequence,
-    NackReason reason
-)
+void sendAck(uint8_t sequence) { sendPacket(Response::Ack, sequence); }
+void sendNack(uint8_t sequence, NackReason reason)
 {
-    sendPacket(
-        Response::Nack,
-        sequence,
-        0,
-        static_cast<uint8_t>(reason)
-    );
-}
-
-PacketStatus receivePacket(Packet& packet)
-{
-    if (Serial.available() < Config::PACKET_LENGTH)
-    {
-        return PacketStatus::NoPacket;
-    }
-
-    uint8_t msg[Config::PACKET_LENGTH];
-
-    const size_t bytesRead = Serial.readBytes(
-        msg,
-        Config::PACKET_LENGTH
-    );
-
-    if (bytesRead != Config::PACKET_LENGTH)
-    {
-        return PacketStatus::NoPacket;
-    }
-
-    if (msg[Config::START_INDEX] != Config::START_BYTE)
-    {
-        return PacketStatus::InvalidStart;
-    }
-
-    if (msg[Config::END_INDEX] != Config::END_BYTE)
-    {
-        return PacketStatus::InvalidEnd;
-    }
-
-    const uint8_t calculatedCrc = calculateCrc8(
-        &msg[Config::COMMAND_INDEX],
-        Config::CRC_INDEX - Config::COMMAND_INDEX
-    );
-
-    if (msg[Config::CRC_INDEX] != calculatedCrc)
-    {
-        return PacketStatus::InvalidCrc;
-    }
-
-    packet.command = msg[Config::COMMAND_INDEX];
-    packet.sequence = msg[Config::SEQUENCE_INDEX];
-    packet.flags = msg[Config::FLAGS_INDEX];
-
-    const uint32_t rawValue =
-        static_cast<uint32_t>(
-            msg[Config::VALUE_INDEX]
-        )
-        |
-        (
-            static_cast<uint32_t>(
-                msg[Config::VALUE_INDEX + 1]
-            ) << 8U
-        )
-        |
-        (
-            static_cast<uint32_t>(
-                msg[Config::VALUE_INDEX + 2]
-            ) << 16U
-        )
-        |
-        (
-            static_cast<uint32_t>(
-                msg[Config::VALUE_INDEX + 3]
-            ) << 24U
-        );
-
-    packet.value = static_cast<int32_t>(rawValue);
-
-    return PacketStatus::Valid;
+    sendPacket(Response::Nack, sequence, 0, static_cast<uint8_t>(reason));
 }

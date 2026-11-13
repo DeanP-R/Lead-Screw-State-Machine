@@ -1,342 +1,369 @@
 #include "state_machine.hpp"
 
-#include <stdlib.h>
-
-#include "config.hpp"
 #include "comms.hpp"
+#include "config.hpp"
+#include "control_logic.hpp"
+#include "distance_sensor.hpp"
 #include "encoder.hpp"
-#include "motor_driver.hpp"
 #include "homing.hpp"
+#include "motor_driver.hpp"
 #include "tracking.hpp"
+
+#include <limits.h>
 
 namespace
 {
-    LifterState currentState = LifterState::Idle;
+    LifterState state = LifterState::Idle;
+    FaultCode fault = FaultCode::None;
+    bool telemetryEnabled = false;
+    uint8_t telemetrySequence = 0;
+    uint8_t operationSequence = 0;
+    unsigned long lastTelemetry = 0;
+    unsigned long operationStart = 0;
+    unsigned long lastProgressTime = 0;
+    unsigned long trackingReadyTime = 0;
+    unsigned long lastTrackingSample = 0;
+    long moveTarget = 0;
+    long lastProgressPosition = 0;
+    bool trackingMove = false;
+    bool commissioningMove = false;
+    bool startupTrackingPending = false;
 
-    uint8_t activeSequence = 0;
+    long absoluteLong(long value) { return value < 0 ? -value : value; }
 
-    int32_t requestedPosition = 0;
-    int32_t requestedMovement = 0;
-
-    // Set once, on the first tick after entering MovingRelative /
-    // MovingAbsolute, then held for the duration of that move.
-    bool movementTargetSet = false;
-    long movementTargetPosition = 0;
-    unsigned long movementStartTime = 0;
-
-    // Tracks the most recent point at which meaningful progress toward
-    // the target was observed, to detect a stalled/blocked move.
-    long movementProgressPosition = 0;
-    unsigned long movementProgressTime = 0;
-
-    // Fault reason codes reported via Response::Fault's flags byte
-    // when a commanded move fails. Kept local to this file since
-    // callers only ever see them echoed back over the wire.
-    enum class MoveFault : uint8_t
+    FaultCode homingFault(HomingResult result)
     {
-        Timeout = 0x01,
-        Stall = 0x02
-    };
+        switch (result)
+        {
+            case HomingResult::InvalidConfiguration: return FaultCode::HomingInvalidConfiguration;
+            case HomingResult::SeekNoMovement: return FaultCode::HomingSeekNoMovement;
+            case HomingResult::SeekReverseMovement: return FaultCode::HomingSeekReverse;
+            case HomingResult::SeekTimeout: return FaultCode::HomingSeekTimeout;
+            case HomingResult::BackoffNoMovement: return FaultCode::HomingBackoffNoMovement;
+            case HomingResult::BackoffReverseMovement: return FaultCode::HomingBackoffReverse;
+            case HomingResult::BackoffStall: return FaultCode::HomingBackoffStall;
+            case HomingResult::BackoffTimeout: return FaultCode::HomingBackoffTimeout;
+            default: return FaultCode::HomingZeroing;
+        }
+    }
 
-    void resetMovementTracking()
+    void latchFault(FaultCode code)
     {
-        movementTargetSet = false;
+        stopMotor();
+        cancelHoming();
+        fault = code;
+        state = LifterState::Fault;
+        trackingMove = false;
+        // A critical motion fault makes the reference untrustworthy.
+        if (code != FaultCode::SensorTimeout &&
+            code != FaultCode::TrackingDiverging) invalidateHome();
+        sendPacket(Response::Fault, operationSequence, getEncoderPosition(),
+                   static_cast<uint8_t>(code));
+    }
+
+    bool prerequisitesExceptSensor()
+    {
+        return Config::COMMISSIONING_COMPLETE && Config::MOTOR_DIRECTION_VERIFIED &&
+            Config::HOMING_VERIFIED && Config::TRAVEL_LIMITS_VERIFIED &&
+            Config::FEEDBACK_DIRECTION_VERIFIED &&
+            (Config::DISTANCE_CHANGE_PER_POSITIVE_MOTION == 1 ||
+             Config::DISTANCE_CHANGE_PER_POSITIVE_MOTION == -1);
+    }
+
+    void startMove(long target, uint8_t sequence, unsigned long now,
+                   bool fromTracking, bool commissioning = false)
+    {
+        moveTarget = target;
+        operationSequence = sequence;
+        operationStart = now;
+        lastProgressTime = now;
+        lastProgressPosition = getEncoderPosition();
+        trackingMove = fromTracking;
+        commissioningMove = commissioning;
+        const MotorDirection direction = target > lastProgressPosition
+            ? MotorDirection::Positive : MotorDirection::Negative;
+        commandMotor(direction, Config::MOTOR_RUN_PWM, now);
+    }
+
+    bool updateMove(unsigned long now)
+    {
+        const long position = getEncoderPosition();
+        const bool positionAllowed = commissioningMove
+            ? absoluteLong(position) <= Config::COMMISSIONING_MAX_JOG_COUNTS
+            : ControlLogic::withinLimits(position, Config::TRAVEL_MIN_COUNTS,
+                                         Config::TRAVEL_MAX_COUNTS);
+        if (!positionAllowed)
+        {
+            latchFault(FaultCode::TravelLimit);
+            return false;
+        }
+        const long remaining = moveTarget - position;
+        const bool reached = absoluteLong(remaining) <= Config::MOVE_TOLERANCE_COUNTS ||
+            (getMotorDirection() == MotorDirection::Positive && remaining < 0) ||
+            (getMotorDirection() == MotorDirection::Negative && remaining > 0);
+        if (reached)
+        {
+            stopMotor();
+            if (!trackingMove)
+                sendPacket(Response::MoveComplete, operationSequence, position);
+            return true;
+        }
+        if (!isMotorRunning())
+        {
+            latchFault(FaultCode::MotorCommandTimeout);
+            return false;
+        }
+        if (absoluteLong(remaining) <= Config::MOVE_DECEL_WINDOW_COUNTS)
+            commandMotor(getMotorDirection(), Config::MOTOR_APPROACH_PWM, now);
+        if (absoluteLong(position - lastProgressPosition) >=
+            Config::MOVE_MIN_PROGRESS_COUNTS)
+        {
+            lastProgressPosition = position;
+            lastProgressTime = now;
+            finishMotorStartBoost();
+        }
+        if (now - lastProgressTime >= Config::MOVE_STALL_TIME_MS)
+        {
+            latchFault(FaultCode::MoveStall);
+            return false;
+        }
+        if (now - operationStart >= Config::MOVE_TIMEOUT_MS)
+        {
+            latchFault(FaultCode::MoveTimeout);
+            return false;
+        }
+        return false;
+    }
+
+    void sendTelemetry(unsigned long now)
+    {
+        if (!telemetryEnabled || now - lastTelemetry < Config::TELEMETRY_INTERVAL_MS)
+            return;
+        lastTelemetry = now;
+        const SensorSample& sample = getLatestSensorSample();
+        const uint8_t stateFlag = static_cast<uint8_t>(state) & 0x0F;
+        const uint8_t distanceFlags = stateFlag | (sample.valid ? 0x80 : 0x00);
+        sendPacket(Response::Distance, telemetrySequence,
+                   sample.valid ? static_cast<int32_t>(sample.distanceMm) : -1,
+                   distanceFlags);
+        sendPacket(Response::Encoder, telemetrySequence, getEncoderPosition(), stateFlag);
+        sendPacket(Response::SensorDiagnostic, telemetrySequence,
+                   getSensorDiagnosticRaw(), getSensorDiagnosticFlags());
+        ++telemetrySequence;
+    }
+
+    void updateTracking(unsigned long now)
+    {
+        if (!prerequisitesExceptSensor() || !isHomed())
+        {
+            latchFault(FaultCode::TravelLimit);
+            return;
+        }
+        if (trackingMove)
+        {
+            if (updateMove(now) && state != LifterState::Fault)
+            {
+                trackingMove = false;
+                trackingReadyTime = now + Config::TRACKING_SETTLE_MS;
+            }
+            return;
+        }
+        if (!hasFreshValidDistance(now))
+        {
+            stopMotor();
+            const unsigned long lastValid = getLastValidDistanceTime();
+            if ((lastValid == 0 && now - operationStart >= Config::SENSOR_TIMEOUT_MS) ||
+                (lastValid != 0 && now - lastValid >= Config::SENSOR_TIMEOUT_MS))
+                latchFault(FaultCode::SensorTimeout);
+            return;
+        }
+        const SensorSample& sample = getLatestSensorSample();
+        if (now < trackingReadyTime || sample.timestamp == lastTrackingSample) return;
+        lastTrackingSample = sample.timestamp;
+        const ControlLogic::Correction correction = ControlLogic::trackingCorrection(
+            getEncoderPosition(), true, getFilteredDistance(), getTrackingStandoff(),
+            Config::TRACKING_DEADBAND_MM,
+            Config::DISTANCE_CHANGE_PER_POSITIVE_MOTION,
+            Config::TRACKING_COUNTS_PER_MM,
+            Config::TRACKING_MIN_CORRECTION_COUNTS,
+            Config::TRACKING_MAX_CORRECTION_COUNTS,
+            Config::TRAVEL_MIN_COUNTS, Config::TRAVEL_MAX_COUNTS);
+        if (correction.status == ControlLogic::CorrectionStatus::Hold)
+        {
+            stopMotor();
+            resetTrackingMonitor();
+            return;
+        }
+        if (correction.status == ControlLogic::CorrectionStatus::AtLimit)
+        {
+            latchFault(FaultCode::TrackingAtLimit);
+            return;
+        }
+        if (correction.status != ControlLogic::CorrectionStatus::Move) return;
+        const uint16_t absoluteError = static_cast<uint16_t>(
+            correction.errorMm < 0 ? -correction.errorMm : correction.errorMm);
+        if (!recordTrackingError(absoluteError))
+        {
+            latchFault(FaultCode::TrackingDiverging);
+            return;
+        }
+        startMove(correction.targetPosition, operationSequence, now, true);
     }
 }
 
-void initialiseStateMachine()
+void initialiseStateMachine(bool sensorInitialised, unsigned long now)
 {
     stopMotor();
-    clearHomedState();
-
-    currentState = LifterState::Idle;
-    activeSequence = 0;
-
-    requestedPosition = 0;
-    requestedMovement = 0;
-
-    resetMovementTracking();
-}
-LifterState getLifterState()
-{
-    return currentState;
-}
-
-bool requestHoming(uint8_t sequence)
-{
-    if (currentState != LifterState::Idle)
+    invalidateHome();
+    resetTrackingMonitor();
+    telemetryEnabled = false;
+    fault = FaultCode::None;
+    state = LifterState::Idle;
+    lastTelemetry = now;
+    if (!sensorInitialised)
     {
-        return false;
+        operationSequence = 0;
+        latchFault(FaultCode::SensorInitialisation);
+        return;
     }
-
-    activeSequence = sequence;
-    currentState = LifterState::Homing;
-
-    return true;
+    if (Config::AUTO_HOME_ON_STARTUP && Config::COMMISSIONING_COMPLETE &&
+        Config::MOTOR_DIRECTION_VERIFIED) requestHoming(0, now);
+    startupTrackingPending = Config::AUTO_TRACK_ON_STARTUP &&
+        prerequisitesExceptSensor();
+    if (startupTrackingPending && state == LifterState::Idle && !isHomed())
+        requestHoming(0, now);
 }
 
-bool requestMoveAbsolute(
-    uint8_t sequence,
-    int32_t targetPosition
-)
+void updateStateMachine(unsigned long now)
 {
-    if (currentState != LifterState::Idle)
+    updateMotor(now);
+    updateDistanceSensor(now);
+    if (state == LifterState::Homing)
     {
-        return false;
+        const HomingResult result = updateHoming(now);
+        if (result == HomingResult::Success)
+        {
+            state = LifterState::Idle;
+            sendPacket(Response::HomeComplete, operationSequence, getEncoderPosition());
+        }
+        else if (result != HomingResult::InProgress)
+            latchFault(homingFault(result));
     }
-
-    activeSequence = sequence;
-    requestedPosition = targetPosition;
-    currentState = LifterState::MovingAbsolute;
-
-    return true;
+    else if (state == LifterState::Moving)
+    {
+        if (updateMove(now) && state != LifterState::Fault) state = LifterState::Idle;
+    }
+    else if (state == LifterState::Tracking) updateTracking(now);
+    else if (state == LifterState::Idle && startupTrackingPending && isHomed() &&
+             hasFreshValidDistance(now))
+    {
+        startupTrackingPending = false;
+        requestStartTracking(0, now);
+    }
+    sendTelemetry(now);
 }
 
-bool requestMoveRelative(
-    uint8_t sequence,
-    int32_t movement
-)
+RequestResult requestHoming(uint8_t sequence, unsigned long now)
 {
-    if (currentState != LifterState::Idle)
-    {
-        return false;
-    }
-
-    activeSequence = sequence;
-    requestedMovement = movement;
-    currentState = LifterState::MovingRelative;
-
-    return true;
+    if (state == LifterState::Fault) return RequestResult::InvalidState;
+    if (state != LifterState::Idle) return RequestResult::Busy;
+    if (!Config::MOTOR_DIRECTION_VERIFIED) return RequestResult::NotCommissioned;
+    operationSequence = sequence;
+    if (!startHoming(now)) return RequestResult::InvalidState;
+    state = LifterState::Homing;
+    return RequestResult::Accepted;
 }
 
-bool requestStartTracking(uint8_t sequence)
+RequestResult requestMoveAbsolute(uint8_t sequence, long target, unsigned long now)
 {
-    if (currentState != LifterState::Idle)
+    if (state == LifterState::Fault) return RequestResult::InvalidState;
+    if (state != LifterState::Idle) return RequestResult::Busy;
+    if (!isHomed()) return RequestResult::NotHomed;
+    if (!Config::TRAVEL_LIMITS_VERIFIED) return RequestResult::NotCommissioned;
+    if (!ControlLogic::withinLimits(target, Config::TRAVEL_MIN_COUNTS,
+                                    Config::TRAVEL_MAX_COUNTS))
+        return RequestResult::OutOfRange;
+    if (absoluteLong(target - getEncoderPosition()) <= Config::MOVE_TOLERANCE_COUNTS)
     {
-        return false;
+        sendPacket(Response::MoveComplete, sequence, getEncoderPosition());
+        return RequestResult::Accepted;
     }
-
-    activeSequence = sequence;
-    currentState = LifterState::Tracking;
-
-    return true;
+    state = LifterState::Moving;
+    startMove(target, sequence, now, false);
+    return RequestResult::Accepted;
 }
 
-bool requestStopTracking(uint8_t sequence)
+RequestResult requestMoveRelative(uint8_t sequence, long offset, unsigned long now)
 {
-    if (currentState != LifterState::Tracking)
+    if (!isHomed() && Config::COMMISSIONING_JOG_ENABLED)
     {
-        return false;
+        if (state != LifterState::Idle) return RequestResult::Busy;
+        if (offset == 0 || absoluteLong(offset) > Config::COMMISSIONING_MAX_JOG_COUNTS)
+            return RequestResult::OutOfRange;
+        // The temporary encoder origin bounds a supervised commissioning jog.
+        setEncoderPosition(0);
+        state = LifterState::Moving;
+        startMove(offset, sequence, now, false, true);
+        return RequestResult::Accepted;
     }
+    if (!isHomed()) return RequestResult::NotHomed;
+    const long position = getEncoderPosition();
+    const int64_t candidate = static_cast<int64_t>(position) + offset;
+    if (candidate < LONG_MIN || candidate > LONG_MAX)
+        return RequestResult::OutOfRange;
+    const long target = static_cast<long>(candidate);
+    return requestMoveAbsolute(sequence, target, now);
+}
 
-    activeSequence = sequence;
+RequestResult requestStartTracking(uint8_t sequence, unsigned long now)
+{
+    if (state == LifterState::Fault) return RequestResult::InvalidState;
+    if (state != LifterState::Idle) return RequestResult::Busy;
+    if (!prerequisitesExceptSensor()) return RequestResult::NotCommissioned;
+    if (!isHomed()) return RequestResult::NotHomed;
+    if (!hasFreshValidDistance(now)) return RequestResult::SensorInvalid;
+    operationSequence = sequence;
+    operationStart = now;
+    trackingReadyTime = now;
+    lastTrackingSample = 0;
+    trackingMove = false;
+    resetTrackingMonitor();
+    state = LifterState::Tracking;
+    return RequestResult::Accepted;
+}
 
+RequestResult requestStopTracking()
+{
+    if (state != LifterState::Tracking) return RequestResult::InvalidState;
     stopMotor();
-
-    currentState = LifterState::Idle;
-
-    return true;
+    trackingMove = false;
+    state = LifterState::Idle;
+    return RequestResult::Accepted;
 }
 
 void requestStop()
 {
     stopMotor();
-    resetMovementTracking();
-    currentState = LifterState::Idle;
+    cancelHoming();
+    trackingMove = false;
+    startupTrackingPending = false;
+    if (state != LifterState::Fault) state = LifterState::Idle;
 }
 
-void clearFault()
+bool clearFault()
 {
-    if (currentState == LifterState::Fault)
-    {
-        resetMovementTracking();
-        currentState = LifterState::Idle;
-    }
+    if (state != LifterState::Fault) return false;
+    stopMotor();
+    if (fault == FaultCode::SensorInitialisation && !initialiseDistanceSensor())
+        return false;
+    fault = FaultCode::None;
+    state = LifterState::Idle;
+    invalidateHome();
+    resetTrackingMonitor();
+    return true;
 }
 
-void updateStateMachine()
-{
-    switch (currentState)
-    {
-        case LifterState::Idle:
-        {
-            stopMotor();
-            break;
-        }
-        case LifterState::Homing:
-        {
-            const HomingResult result = homing();
-
-            if (result == HomingResult::Success)
-            {
-                currentState = LifterState::Idle;
-
-                sendPacket(
-                    Response::HomeComplete,
-                    activeSequence,
-                    getEncoderPosition(),
-                    static_cast<uint8_t>(currentState)
-                );
-            }
-            else
-            {
-                currentState = LifterState::Fault;
-
-                sendPacket(
-                    Response::Fault,
-                    activeSequence,
-                    getEncoderPosition(),
-                    static_cast<uint8_t>(result)
-                );
-            }
-
-            break;
-        }
-
-        case LifterState::MovingAbsolute:
-        {
-            /*
-            #TODO:
-
-            const MovementStatus status =
-                updateAbsoluteMovement(requestedPosition);
-
-            if (status == MovementStatus::Complete)
-            {
-                sendPacket(
-                    Response::MoveComplete,
-                    activeSequence,
-                    getEncoderPosition(),
-                    0
-                );
-
-                currentState = LifterState::Idle;
-            }
-            */
-
-            break;
-        }
-
-        case LifterState::MovingRelative:
-        {
-            const unsigned long currentTime = millis();
-            const long currentPosition = getEncoderPosition();
-
-            if (!movementTargetSet)
-            {
-                movementTargetPosition =
-                    currentPosition + requestedMovement;
-
-                movementStartTime = currentTime;
-                movementProgressTime = currentTime;
-                movementProgressPosition = currentPosition;
-                movementTargetSet = true;
-            }
-
-            const long remaining =
-                movementTargetPosition - currentPosition;
-
-            /*
-             * Close enough — treat the move as complete. Chasing an
-             * exact count would fight encoder noise and backlash near
-             * the target forever.
-             */
-            if (labs(remaining) <= Config::MOVE_TOLERANCE_COUNTS)
-            {
-                stopMotor();
-                resetMovementTracking();
-
-                sendPacket(
-                    Response::MoveComplete,
-                    activeSequence,
-                    currentPosition,
-                    static_cast<uint8_t>(LifterState::Idle)
-                );
-
-                currentState = LifterState::Idle;
-
-                break;
-            }
-
-            /*
-             * Safety cutoff if the target is never reached (mechanism
-             * jammed, unreachable target, etc).
-             */
-            if (currentTime - movementStartTime >= Config::MOVE_TIMEOUT_MS)
-            {
-                stopMotor();
-                resetMovementTracking();
-
-                sendPacket(
-                    Response::Fault,
-                    activeSequence,
-                    currentPosition,
-                    static_cast<uint8_t>(MoveFault::Timeout)
-                );
-
-                currentState = LifterState::Fault;
-
-                break;
-            }
-
-            /*
-             * Stall protection: if the mechanism is blocked (e.g. the
-             * target is past the physical end of travel), don't keep
-             * driving into it for the full timeout — stop as soon as
-             * progress toward the target has genuinely stopped.
-             */
-            if (labs(currentPosition - movementProgressPosition) >=
-                Config::MOVE_MIN_PROGRESS_COUNTS)
-            {
-                movementProgressPosition = currentPosition;
-                movementProgressTime = currentTime;
-            }
-            else if (currentTime - movementProgressTime >=
-                     Config::MOVE_STALL_TIME_MS)
-            {
-                stopMotor();
-                resetMovementTracking();
-
-                sendPacket(
-                    Response::Fault,
-                    activeSequence,
-                    currentPosition,
-                    static_cast<uint8_t>(MoveFault::Stall)
-                );
-
-                currentState = LifterState::Fault;
-
-                break;
-            }
-
-            /*
-             * Not there yet — nudge one pulse closer. Positive
-             * `remaining` means the target is above the current
-             * position (encoder increasing = upward, per
-             * driveMotorCCW's convention in motor_driver.cpp).
-             */
-            if (remaining > 0)
-            {
-                pulseMotorCCW();
-            }
-            else
-            {
-                pulseMotorCW();
-            }
-
-            break;
-        }
-
-        case LifterState::Tracking:
-        {
-            standoff_tracking();
-            break;
-        }
-
-        case LifterState::Fault:
-        {
-            stopMotor();
-            break;
-        }
-    }
-}
+void setTelemetryEnabled(bool enabled) { telemetryEnabled = enabled; }
+bool isTelemetryEnabled() { return telemetryEnabled; }
+LifterState getLifterState() { return state; }
+FaultCode getFaultCode() { return fault; }

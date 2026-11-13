@@ -1,38 +1,26 @@
 #pragma once
 
-#include <stdint.h>
+#include <Arduino.h>
 
 enum class HomingResult : uint8_t
 {
+    InProgress = 0xFF,
     Success = 0x00,
-
     InvalidConfiguration = 0x01,
-
     SeekNoMovement = 0x02,
     SeekReverseMovement = 0x03,
     SeekTimeout = 0x04,
-
     BackoffNoMovement = 0x05,
     BackoffReverseMovement = 0x06,
     BackoffStall = 0x07,
     BackoffTimeout = 0x08,
-
-    ZeroingFailed = 0x09
+    ZeroingFailed = 0x09,
+    Cancelled = 0x0A
 };
 
-/**
- * Perform the complete blocking homing sequence.
- *
- * @return HomingResult describing success or the failure reason.
- */
-HomingResult homing();
-
-/**
- * Return whether the axis has completed homing successfully.
- */
+bool startHoming(unsigned long now);
+HomingResult updateHoming(unsigned long now);
+void cancelHoming();
+bool isHomingActive();
 bool isHomed();
-
-/**
- * Mark the axis as unhomed.
- */
-void clearHomedState();
+void invalidateHome();
