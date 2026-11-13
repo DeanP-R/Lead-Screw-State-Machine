@@ -11,6 +11,7 @@ All values are in `include/config.hpp`.
 | Direction | `HOME_SEEK_ENCODER_DIRECTION`, `DISTANCE_CHANGE_PER_POSITIVE_MOTION` | Must be measured, never assumed |
 | Limits | `TRAVEL_MIN_COUNTS`, `TRAVEL_MAX_COUNTS` | Normal-motion envelope after home |
 | Commissioning jog | `COMMISSIONING_JOG_ENABLED`, `COMMISSIONING_MAX_JOG_COUNTS` | Temporary supervised short relative jog; default disabled |
+| Travel survey | `TRAVEL_SURVEY_ENABLED`, provisional min/max, maximum step, stall/timeout | One-way, post-home range survey; default disabled |
 | PWM | `MOTOR_START_PWM`, `MOTOR_RUN_PWM`, `MOTOR_HOMING_PWM`, `MOTOR_APPROACH_PWM`, `MOTOR_MIN_PWM` | Boost, cruise, homing and approach duty |
 | Motion safety | boost/ramp, command/move timeout, tolerance, progress and decel window | Start behavior and watchdogs |
 | Homing | seek/backoff counts, reverse limits, progress windows and phase timeouts | Bounded stall-based reference sequence |
@@ -28,10 +29,55 @@ Use supports that prevent the probe/carriage falling, provide an accessible powe
 4. **Short direction jog:** physically center the carriage. Temporarily enable only `COMMISSIONING_JOG_ENABLED`; keep auto flags false. Use very small relative commands in both signs, record physical direction and encoder sign, test STOP during motion, then disable the jog feature.
 5. **PWM characterization:** with conservative travel, test start PWM/duration, run and approach PWM across expected orientation/load. Record failures, voltage and encoder latency. Fix mechanical resistance first; assess a MOSFET H-bridge if L298N voltage loss limits torque.
 6. **Homing direction:** set `HOME_SEEK_ENCODER_DIRECTION` from the measured encoder sign and set `MOTOR_DIRECTION_VERIFIED=true`. Supervise one home. Test STOP during seek and backoff, reverse-motion detection, no-movement behavior and timeout. Confirm it backs away and zeroes only after success.
-7. **Travel survey:** from the verified home, measure the usable range without contacting the opposite stop. Set conservative min/max counts with clearance. Set `HOMING_VERIFIED` and `TRAVEL_LIMITS_VERIFIED` only after repeated tests. Attempt commands just inside and outside both limits.
+7. **Travel survey:** after homing is verified, use the dedicated survey build described below. Move away from the upper stop in steps no larger than 100 counts, expand the provisional negative envelope only after review, and never contact the opposite stop. Establish final limits with clearance before setting `TRAVEL_LIMITS_VERIFIED=true`.
 8. **Feedback sign:** at a safe mid-travel point, make one small positive encoder move and measure whether VL53L0X distance increases or decreases. Set `DISTANCE_CHANGE_PER_POSITIVE_MOTION` to `+1` or `-1`; repeat to confirm and then set `FEEDBACK_DIRECTION_VERIFIED=true`.
 9. **Manual tracking:** set target/deadband from measurements at the actual surface. Start tracking manually. Verify the first correction reduces error, invalid readings stop motion, all corrections stay inside limits, STOP is immediate, and a non-improving sequence faults.
 10. **Endurance and restart:** test orientation/load extremes, cable motion, sensor dropout, encoder disconnect, motor jam, serial disconnect/reconnect, controller reset and repeated home/track cycles. Review logs and temperature.
 11. **Automatic startup:** only after sign-off set `COMMISSIONING_COMPLETE=true`. Enable `AUTO_HOME_ON_STARTUP`, then separately `AUTO_TRACK_ON_STARTUP`. Re-run reset/USB/power-loss tests. Keep a maintenance build/profile with automatic flags false.
 
 Record the exact tested firmware commit and configuration values. Compilation and simulation alone do not establish hardware reliability.
+
+## Dedicated travel-survey build
+
+Travel survey reuses `MOVE_RELATIVE (0x03)` but is isolated from both unhomed commissioning jogs and normal verified-limit motion. It is disabled by default.
+
+Enable it only after direction and manual homing have passed:
+
+```cpp
+COMMISSIONING_COMPLETE = false;
+MOTOR_DIRECTION_VERIFIED = true;
+HOMING_VERIFIED = true;
+TRAVEL_LIMITS_VERIFIED = false;
+AUTO_HOME_ON_STARTUP = false;
+AUTO_TRACK_ON_STARTUP = false;
+COMMISSIONING_JOG_ENABLED = false;
+TRAVEL_SURVEY_ENABLED = true;
+```
+
+Initial provisional controls are:
+
+```text
+TRAVEL_SURVEY_MIN_COUNTS = -500
+TRAVEL_SURVEY_MAX_COUNTS = 0
+TRAVEL_SURVEY_MAX_STEP_COUNTS = 100
+TRAVEL_SURVEY_STALL_TIME_MS = 500
+TRAVEL_SURVEY_TIMEOUT_MS = 3000
+```
+
+Compile-time checks reject a survey build with automatic homing/tracking, completed commissioning, a reversed envelope, or an envelope above backed-off home zero.
+
+Procedure:
+
+1. Manually HOME and require ACK followed by HOME_COMPLETE with encoder zero.
+2. Send `relative -25` first. Require ACK followed by MOVE_COMPLETE between `-20` and `-30` counts, no physical approach toward the upper stop, and no abnormal current/noise.
+3. Continue with negative steps no larger than 100 counts. Every target and every measured position must remain inside the provisional envelope.
+4. Confirm `relative 1` is rejected with NACK `0x05`; positive survey movement is never allowed, even when below zero. To return upward, issue a new supervised HOME rather than a positive survey move.
+5. Confirm `relative -101` is rejected with NACK `0x05`.
+6. At `-500`, confirm another negative request is rejected with NACK `0x05`.
+7. Test STOP during a survey move. Require motor disable, STOP ACK, IDLE status, no automatic continuation and no later MOVE_COMPLETE for the cancelled move.
+8. Test an encoder-disconnect or safely simulated no-progress condition. Require FAULT `0x20` within 500 ms and immediate motor disable.
+9. Confirm no survey move can continue beyond 3000 ms; timeout produces FAULT `0x21`.
+10. If more range is known to be physically safe, power down, review the log, extend only `TRAVEL_SURVEY_MIN_COUNTS` by a conservative increment, rebuild, re-home and repeat. Do not increase the 100-count step limit to accelerate the survey.
+11. Record the last safe count before the required physical clearance. Configure the final `TRAVEL_MIN_COUNTS` and `TRAVEL_MAX_COUNTS`, disable survey mode, and only then set `TRAVEL_LIMITS_VERIFIED=true`.
+
+When `TRAVEL_LIMITS_VERIFIED=true`, the survey path is not used. Normal and tracking motion remain governed solely by the final software limits.

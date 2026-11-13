@@ -26,7 +26,8 @@ namespace
     long moveTarget = 0;
     long lastProgressPosition = 0;
     bool trackingMove = false;
-    bool commissioningMove = false;
+    enum class MotionMode : uint8_t { Normal, CommissioningJog, TravelSurvey };
+    MotionMode motionMode = MotionMode::Normal;
     bool startupTrackingPending = false;
 
     long absoluteLong(long value) { return value < 0 ? -value : value; }
@@ -71,7 +72,7 @@ namespace
     }
 
     void startMove(long target, uint8_t sequence, unsigned long now,
-                   bool fromTracking, bool commissioning = false)
+                   bool fromTracking, MotionMode mode = MotionMode::Normal)
     {
         moveTarget = target;
         operationSequence = sequence;
@@ -79,7 +80,7 @@ namespace
         lastProgressTime = now;
         lastProgressPosition = getEncoderPosition();
         trackingMove = fromTracking;
-        commissioningMove = commissioning;
+        motionMode = mode;
         const MotorDirection direction = target > lastProgressPosition
             ? MotorDirection::Positive : MotorDirection::Negative;
         commandMotor(direction, Config::MOTOR_RUN_PWM, now);
@@ -88,10 +89,15 @@ namespace
     bool updateMove(unsigned long now)
     {
         const long position = getEncoderPosition();
-        const bool positionAllowed = commissioningMove
-            ? absoluteLong(position) <= Config::COMMISSIONING_MAX_JOG_COUNTS
-            : ControlLogic::withinLimits(position, Config::TRAVEL_MIN_COUNTS,
-                                         Config::TRAVEL_MAX_COUNTS);
+        bool positionAllowed = ControlLogic::withinLimits(
+            position, Config::TRAVEL_MIN_COUNTS, Config::TRAVEL_MAX_COUNTS);
+        if (motionMode == MotionMode::CommissioningJog)
+            positionAllowed = absoluteLong(position) <=
+                Config::COMMISSIONING_MAX_JOG_COUNTS;
+        else if (motionMode == MotionMode::TravelSurvey)
+            positionAllowed = ControlLogic::withinLimits(
+                position, Config::TRAVEL_SURVEY_MIN_COUNTS,
+                Config::TRAVEL_SURVEY_MAX_COUNTS);
         if (!positionAllowed)
         {
             latchFault(FaultCode::TravelLimit);
@@ -122,12 +128,16 @@ namespace
             lastProgressTime = now;
             finishMotorStartBoost();
         }
-        if (now - lastProgressTime >= Config::MOVE_STALL_TIME_MS)
+        const unsigned long stallTime = motionMode == MotionMode::TravelSurvey
+            ? Config::TRAVEL_SURVEY_STALL_TIME_MS : Config::MOVE_STALL_TIME_MS;
+        const unsigned long moveTimeout = motionMode == MotionMode::TravelSurvey
+            ? Config::TRAVEL_SURVEY_TIMEOUT_MS : Config::MOVE_TIMEOUT_MS;
+        if (now - lastProgressTime >= stallTime)
         {
             latchFault(FaultCode::MoveStall);
             return false;
         }
-        if (now - operationStart >= Config::MOVE_TIMEOUT_MS)
+        if (now - operationStart >= moveTimeout)
         {
             latchFault(FaultCode::MoveTimeout);
             return false;
@@ -303,10 +313,43 @@ RequestResult requestMoveRelative(uint8_t sequence, long offset, unsigned long n
         // The temporary encoder origin bounds a supervised commissioning jog.
         setEncoderPosition(0);
         state = LifterState::Moving;
-        startMove(offset, sequence, now, false, true);
+        startMove(offset, sequence, now, false, MotionMode::CommissioningJog);
         return RequestResult::Accepted;
     }
     if (!isHomed()) return RequestResult::NotHomed;
+
+    if (Config::TRAVEL_SURVEY_ENABLED && !Config::TRAVEL_LIMITS_VERIFIED)
+    {
+        ControlLogic::TravelSurveyPrerequisites prerequisites = {};
+        prerequisites.enabled = Config::TRAVEL_SURVEY_ENABLED;
+        prerequisites.commissioningComplete = Config::COMMISSIONING_COMPLETE;
+        prerequisites.motorDirectionVerified = Config::MOTOR_DIRECTION_VERIFIED;
+        prerequisites.homed = isHomed();
+        prerequisites.homingVerified = Config::HOMING_VERIFIED;
+        prerequisites.travelLimitsVerified = Config::TRAVEL_LIMITS_VERIFIED;
+        prerequisites.automaticHoming = Config::AUTO_HOME_ON_STARTUP;
+        prerequisites.automaticTracking = Config::AUTO_TRACK_ON_STARTUP;
+        const ControlLogic::TravelSurveyDecision decision =
+            ControlLogic::travelSurveyMove(
+                prerequisites, getEncoderPosition(), offset,
+                Config::TRAVEL_SURVEY_MAX_STEP_COUNTS,
+                Config::TRAVEL_SURVEY_MIN_COUNTS,
+                Config::TRAVEL_SURVEY_MAX_COUNTS);
+        if (decision.status == ControlLogic::TravelSurveyStatus::Accepted)
+        {
+            state = LifterState::Moving;
+            startMove(decision.targetPosition, sequence, now, false,
+                      MotionMode::TravelSurvey);
+            return RequestResult::Accepted;
+        }
+        if (decision.status == ControlLogic::TravelSurveyStatus::StepTooLarge ||
+            decision.status == ControlLogic::TravelSurveyStatus::OutsideEnvelope ||
+            decision.status == ControlLogic::TravelSurveyStatus::TowardUpperStop ||
+            decision.status == ControlLogic::TravelSurveyStatus::InvalidEnvelope)
+            return RequestResult::OutOfRange;
+        return RequestResult::NotCommissioned;
+    }
+
     const long position = getEncoderPosition();
     const int64_t candidate = static_cast<int64_t>(position) + offset;
     if (candidate < LONG_MIN || candidate > LONG_MAX)
@@ -367,3 +410,14 @@ void setTelemetryEnabled(bool enabled) { telemetryEnabled = enabled; }
 bool isTelemetryEnabled() { return telemetryEnabled; }
 LifterState getLifterState() { return state; }
 FaultCode getFaultCode() { return fault; }
+
+#ifdef UNIT_TEST
+void testBeginMove(long target, unsigned long now, bool travelSurvey)
+{
+    state = LifterState::Moving;
+    startMove(target, 0, now, false,
+              travelSurvey ? MotionMode::TravelSurvey : MotionMode::Normal);
+}
+
+void testSetLifterState(LifterState newState) { state = newState; }
+#endif

@@ -23,6 +23,29 @@ namespace Config
     constexpr bool COMMISSIONING_JOG_ENABLED = false;
     constexpr long COMMISSIONING_MAX_JOG_COUNTS = 100;
 
+    // Supervised, post-home range survey. Expand the provisional minimum only
+    // in reviewed stages; zero is the backed-off home position.
+    constexpr bool TRAVEL_SURVEY_ENABLED = false;
+    constexpr long TRAVEL_SURVEY_MIN_COUNTS = -500;
+    constexpr long TRAVEL_SURVEY_MAX_COUNTS = 0;
+    constexpr long TRAVEL_SURVEY_MAX_STEP_COUNTS = 100;
+    constexpr unsigned long TRAVEL_SURVEY_STALL_TIME_MS = 500;
+    constexpr unsigned long TRAVEL_SURVEY_TIMEOUT_MS = 3000;
+
+    static_assert(TRAVEL_SURVEY_MIN_COUNTS <= TRAVEL_SURVEY_MAX_COUNTS,
+                  "Travel survey envelope is reversed");
+    static_assert(TRAVEL_SURVEY_MAX_COUNTS <= 0,
+                  "Travel survey must not move above backed-off home zero");
+    static_assert(TRAVEL_SURVEY_MAX_STEP_COUNTS > 0,
+                  "Travel survey step must be positive");
+    static_assert(!TRAVEL_SURVEY_ENABLED ||
+                  (!AUTO_HOME_ON_STARTUP && !AUTO_TRACK_ON_STARTUP),
+                  "Travel survey forbids automatic homing/tracking");
+    static_assert(!TRAVEL_SURVEY_ENABLED || !COMMISSIONING_COMPLETE,
+                  "Travel survey is commissioning-only");
+    static_assert(!TRAVEL_SURVEY_ENABLED || !TRAVEL_LIMITS_VERIFIED,
+                  "Travel survey and final verified limits are mutually exclusive");
+
     constexpr int8_t HOME_SEEK_ENCODER_DIRECTION = 1;
     // +1: positive motion increases distance; -1: decreases it; 0: unknown.
     constexpr int8_t DISTANCE_CHANGE_PER_POSITIVE_MOTION = 0;

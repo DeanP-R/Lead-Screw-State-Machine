@@ -48,4 +48,35 @@ namespace ControlLogic
             return Correction(CorrectionStatus::AtLimit, position, error);
         return Correction(CorrectionStatus::Move, bounded, error);
     }
+
+    TravelSurveyDecision travelSurveyMove(
+        const TravelSurveyPrerequisites& p, long position, long offset,
+        long maximumStep, long provisionalMinimum, long provisionalMaximum)
+    {
+        if (!p.enabled)
+            return TravelSurveyDecision(TravelSurveyStatus::Disabled, position);
+        if (p.commissioningComplete || !p.motorDirectionVerified || !p.homed ||
+            !p.homingVerified || p.travelLimitsVerified || p.automaticHoming ||
+            p.automaticTracking)
+            return TravelSurveyDecision(TravelSurveyStatus::NotReady, position);
+        if (provisionalMinimum > provisionalMaximum || provisionalMaximum > 0 ||
+            maximumStep <= 0)
+            return TravelSurveyDecision(TravelSurveyStatus::InvalidEnvelope, position);
+        // Survey motion is deliberately one-way: away from the upper stop.
+        // Returning upward requires a new supervised HOME operation.
+        if (offset > 0)
+            return TravelSurveyDecision(TravelSurveyStatus::TowardUpperStop, position);
+        if (offset == 0 || offset < -maximumStep)
+            return TravelSurveyDecision(TravelSurveyStatus::StepTooLarge, position);
+        if (!withinLimits(position, provisionalMinimum, provisionalMaximum))
+            return TravelSurveyDecision(TravelSurveyStatus::OutsideEnvelope, position);
+
+        const int64_t candidate = static_cast<int64_t>(position) + offset;
+        if (candidate > 0)
+            return TravelSurveyDecision(TravelSurveyStatus::TowardUpperStop, position);
+        if (candidate < provisionalMinimum || candidate > provisionalMaximum)
+            return TravelSurveyDecision(TravelSurveyStatus::OutsideEnvelope, position);
+        return TravelSurveyDecision(TravelSurveyStatus::Accepted,
+                                    static_cast<long>(candidate));
+    }
 }

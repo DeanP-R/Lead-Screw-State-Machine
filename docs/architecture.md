@@ -65,6 +65,12 @@ The controller intentionally uses explainable step control rather than PID:
 
 Unknown feedback direction, unverified limits, lack of home or invalid sensor data prevents tracking from starting.
 
+## Supervised travel survey
+
+Travel survey is a separate commissioning-only relative-move path. It requires an existing valid home, verified motor direction and verified homing, while final travel limits and completed commissioning must still be false. Automatic homing and tracking must be disabled.
+
+Each command must be a small negative move away from backed-off home zero. Positive moves are rejected, targets are restricted to a configurable provisional envelope, and the measured encoder position is checked throughout motion. Survey moves use the normal encoder progress detector with survey-specific stall and timeout values. STOP follows the same immediate cancellation path as other motion. Enabling final verified limits removes the survey path; it cannot widen or bypass the normal envelope.
+
 ## Recovery behavior
 
 Critical faults disable the motor and latch FAULT. STOP always disables motion but does not clear a critical fault. CLEAR_FAULT is accepted only in FAULT; a sensor-initialisation fault must successfully reinitialise the sensor. Recovery invalidates home, so normal movement/tracking requires re-homing. Automatic startup does not restart after a runtime fault.

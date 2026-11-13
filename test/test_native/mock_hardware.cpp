@@ -23,6 +23,7 @@ void mockResetHardware()
     sample = SensorSample();
 }
 bool mockMotorStopped() { return motorStopped; }
+void mockMarkMotorRunning() { motorStopped = false; }
 void mockSetSensorInitialisation(bool succeeds) { sensorInitialisation = succeeds; }
 
 void stopMotor() { motorStopped = true; }

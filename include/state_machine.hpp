@@ -50,3 +50,8 @@ void setTelemetryEnabled(bool enabled);
 bool isTelemetryEnabled();
 LifterState getLifterState();
 FaultCode getFaultCode();
+
+#ifdef UNIT_TEST
+void testBeginMove(long target, unsigned long now, bool travelSurvey = false);
+void testSetLifterState(LifterState state);
+#endif
